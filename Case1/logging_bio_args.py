@@ -9,12 +9,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 # Import stable baseline
-from stable_baselines.bench.monitor import Monitor, load_results
-from stable_baselines.common.policies import MlpPolicy
-from stable_baselines.ddpg.policies import MlpPolicy as MlpPolicy_DDPG
-from stable_baselines.td3.policies import MlpPolicy as MlpPolicy_TD3
-from stable_baselines.sac.policies import MlpPolicy as MlpPolicy_SAC
-from stable_baselines import TRPO, DDPG, PPO1, TD3, SAC
+from stable_baselines3.common.monitor import Monitor, load_results
+from stable_baselines3.ppo.policies import MlpPolicy
+from stable_baselines3.ddpg.policies import MlpPolicy as MlpPolicy_DDPG
+from stable_baselines3.td3.policies import MlpPolicy as MlpPolicy_TD3
+from stable_baselines3.sac.policies import MlpPolicy as MlpPolicy_SAC
+from stable_baselines3 import DDPG, PPO, TD3, SAC
 
 # Import simulation environment
 from set_environment import Environment
@@ -57,6 +57,7 @@ def plot_results(log_folder, title="Learning Curve"):
     plt.close()
 
 
+
 parser = argparse.ArgumentParser()
 
 ########### training and data info ###########
@@ -78,17 +79,9 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-if args.algo_name == "TRPO":
-    MLP = MlpPolicy
-    algo = TRPO
-    batchsize = "timesteps_per_batch"
-    offpolicy = False
-elif args.algo_name == "PPO":
-    MLP = MlpPolicy
-    algo = PPO1
-    batchsize = "timesteps_per_actorbatch"
-    offpolicy = False
-elif args.algo_name == "DDPG":
+
+
+if args.algo_name == "DDPG":
     MLP = MlpPolicy_DDPG
     algo = DDPG
     batchsize = "nb_rollout_steps"
@@ -103,6 +96,11 @@ elif args.algo_name == "SAC":
     algo = SAC
     batchsize = "train_freq"
     offpolicy = True
+else:
+    MLP = MlpPolicy
+    algo = PPO
+    batchsize = "n_steps"
+    offpolicy = False
 
 # Mode 4 corresponds to randomly moving target
 args.mode = 4
@@ -121,7 +119,7 @@ args.beta = 75
 
 sim_dt = 2.0e-4
 
-max_rate_of_change_of_activation = np.infty
+max_rate_of_change_of_activation = np.inf
 print("rate of change", max_rate_of_change_of_activation)
 
 # If True, train. Otherwise run trained policy
@@ -157,8 +155,8 @@ if args.TRAIN:
     env = Monitor(env, log_dir)
 
 
-from stable_baselines.results_plotter import ts2xy, plot_results
-from stable_baselines import results_plotter
+from stable_baselines3.common.results_plotter import ts2xy, plot_results
+from stable_baselines3.common import results_plotter
 
 if args.TRAIN:
     if offpolicy:
@@ -185,14 +183,14 @@ if args.TRAIN:
         [log_dir],
         int(args.total_timesteps),
         results_plotter.X_TIMESTEPS,
-        "TRPO muscle" + identifer,
+        "PPO muscle" + identifer,
     )
     plt.savefig("convergence_plot" + identifer + ".png")
     model.save("policy-" + identifer)
 
 else:
     # Use trained policy for the simulation.
-    model = TRPO.load("trpo_" + identifer)
+    model = PPO.load("ppo_" + identifer)
     obs = env.reset()
 
     done = False

@@ -3,8 +3,8 @@ Actuation torques acting on arm can generate torques in normal, binormal and tan
 direction. Environment set in this file is interfaced with stable-baselines and OpenAI Gym. It is shown that this
 environment works with PPO, TD3, DDPG, TRPO and SAC."""
 
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 
 
 import copy
@@ -298,7 +298,7 @@ class Environment(gym.Env):
         self.acti_coef = kwargs.get("acti_coef", 1e-1)
 
         self.max_rate_of_change_of_activation = kwargs.get(
-            "max_rate_of_change_of_activation", np.infty
+            "max_rate_of_change_of_activation", np.inf
         )
 
         self.E = kwargs.get("E", 1e7)
@@ -307,7 +307,7 @@ class Environment(gym.Env):
 
         self.n_elem = n_elem
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         """
 
         This class method, resets and creates the simulation environment. First,
@@ -370,7 +370,7 @@ class Environment(gym.Env):
             elif self.dim == 3.0 or self.dim == 3.5:
                 t_z = np.random.uniform(self.boundary[4], self.boundary[5])
 
-            print("Target position:", t_x, t_y, t_z)
+            # print("Target position:", t_x, t_y, t_z)
             target_position = np.array([t_x, t_y, t_z])
 
         # initialize sphere
@@ -624,7 +624,7 @@ class Environment(gym.Env):
         self.previous_action = None
 
         # After resetting the environment return state information
-        return state
+        return state, {}
 
     def sampleAction(self):
         """
@@ -902,7 +902,7 @@ class Environment(gym.Env):
 
         self.previous_action = action
 
-        return state, reward, done, {"ctime": self.time_tracker}
+        return state, reward, done, {"ctime": self.time_tracker}, {}
 
     def render(self, mode="human"):
         """
