@@ -3,9 +3,11 @@ Actuation torques acting on arm can generate torques in normal, binormal and tan
 direction. Environment set in this file is interfaced with stable-baselines and OpenAI Gym. It is shown that this
 environment works with PPO, TD3, DDPG, TRPO and SAC."""
 
+from typing import Any
+
 import gymnasium as gym
 from gymnasium import spaces
-
+import numpy as np
 
 import copy
 import sys
@@ -17,10 +19,11 @@ from MuscleTorquesWithBspline.BsplineMuscleTorques import (
 
 from elastica._calculus import _isnan_check
 from elastica.timestepper import extend_stepper_interface
-from elastica import *
+# from elastica import *
+import elastica as ea
 
 # Set base simulator class
-class BaseSimulator(BaseSystemCollection, Constraints, Connections, Forcing, CallBacks):
+class BaseSimulator(ea.BaseSystemCollection, ea.Constraints, ea.Connections, ea.Forcing, ea.Damping, ea.CallBacks):
     pass
 
 
@@ -198,7 +201,7 @@ class Environment(gym.Env):
         super(Environment, self).__init__()
         self.dim = dim
         # Integrator type
-        self.StatefulStepper = PositionVerlet()
+        self.StatefulStepper = ea.PositionVerlet()
 
         # Simulation parameters
         self.final_time = final_time
@@ -272,15 +275,15 @@ class Environment(gym.Env):
         # here we specify 4 tasks that can possibly used
         self.mode = mode
 
-        if self.mode is 2:
+        if self.mode == 2:
             assert "boundary" in kwargs, "need to specify boundary in mode 2"
             self.boundary = kwargs["boundary"]
 
-        if self.mode is 3:
+        if self.mode == 3:
             assert "target_v" in kwargs, "need to specify target_v in mode 3"
             self.target_v = kwargs["target_v"]
 
-        if self.mode is 4:
+        if self.mode == 4:
             assert (
                 "boundary" and "target_v" in kwargs
             ), "need to specify boundary and target_v in mode 4"
@@ -303,7 +306,7 @@ class Environment(gym.Env):
 
         self.E = kwargs.get("E", 1e7)
 
-        self.NU = kwargs.get("NU", 10)
+        self.UDC = kwargs.get("UDC", 0.05)
 
         self.n_elem = n_elem
 
@@ -329,9 +332,10 @@ class Environment(gym.Env):
         binormal = np.cross(direction, normal)
 
         density = 1000
-        nu = self.NU  # dissipation coefficient
+        damping_constant = self.UDC #uniform_damping_constant
         E = self.E  # Young's Modulus
         poisson_ratio = 0.5
+        shear_modulus = E / (poisson_ratio + 1.0)
 
         # Set the arm properties after defining rods
         base_length = 1.0  # rod base length
@@ -341,21 +345,29 @@ class Environment(gym.Env):
         radius_along_rod = np.linspace(radius_base, radius_tip, n_elem)
 
         # Arm is shearable Cosserat rod
-        self.shearable_rod = CosseratRod.straight_rod(
+        self.shearable_rod = ea.CosseratRod.straight_rod(
             n_elem,
             start,
             direction,
             normal,
             base_length,
-            base_radius=radius_along_rod,
+            base_radius=radius_base,
             density=density,
-            nu=nu,
             youngs_modulus=E,
-            poisson_ratio=poisson_ratio,
+            shear_modulus=shear_modulus,
         )
 
         # Now rod is ready for simulation, append rod to simulation
         self.simulator.append(self.shearable_rod)
+
+        # add damping
+        self.simulator.dampen(self.shearable_rod).using(
+            ea.AnalyticalLinearDamper,
+            uniform_damping_constant=damping_constant,
+            time_step=self.h_time_step,  # Simulation time-step
+        )
+
+
         # self.mode = 4
         if self.mode != 2:
             # fixed target position to reach
@@ -374,7 +386,7 @@ class Environment(gym.Env):
             target_position = np.array([t_x, t_y, t_z])
 
         # initialize sphere
-        self.sphere = Sphere(
+        self.sphere = ea.Sphere(
             center=target_position,  # initialize target position of the ball
             base_radius=0.05,
             density=1000,
@@ -423,7 +435,7 @@ class Environment(gym.Env):
         ] = self.shearable_rod.director_collection[..., 0]
         self.simulator.append(self.sphere)
 
-        class WallBoundaryForSphere(FreeRod):
+        class WallBoundaryForSphere(ea.FreeBC):
             """
 
             This class generates a bounded space that sphere can move inside. If sphere
@@ -432,7 +444,8 @@ class Environment(gym.Env):
 
             """
 
-            def __init__(self, boundaries):
+            def __init__(self, boundaries,  **kwargs: Any) -> None:
+                super().__init__(**kwargs)
                 self.x_boundary_low = boundaries[0]
                 self.x_boundary_high = boundaries[1]
                 self.y_boundary_low = boundaries[2]
@@ -440,7 +453,10 @@ class Environment(gym.Env):
                 self.z_boundary_low = boundaries[4]
                 self.z_boundary_high = boundaries[5]
 
-            def constrain_values(self, sphere, time):
+                # self.sphere = kwargs["_system"]
+
+            def constrain_values(self, time, **kwargs: Any):
+                sphere = kwargs["system"]
                 pos_x = sphere.position_collection[0]
                 pos_y = sphere.position_collection[1]
                 pos_z = sphere.position_collection[2]
@@ -469,7 +485,7 @@ class Environment(gym.Env):
                 if (pos_z + radius) > self.z_boundary_high:
                     sphere.velocity_collection[:] = np.array([vx, vy, -vz])
 
-            def constrain_rates(self, sphere, time):
+            def constrain_rates(self, time, **kwargs: Any):
                 pass
 
         if self.mode == 4:
@@ -479,13 +495,13 @@ class Environment(gym.Env):
 
         # Add boundary constraints as fixing one end
         self.simulator.constrain(self.shearable_rod).using(
-            OneEndFixedRod, constrained_position_idx=(0,), constrained_director_idx=(0,)
+            ea.OneEndFixedBC, constrained_position_idx=(0,), constrained_director_idx=(0,)
         )
 
         # Add muscle torques acting on the arm for actuation
         # MuscleTorquesWithVaryingBetaSplines uses the control points selected by RL to
         # generate torques along the arm.
-        self.torque_profile_list_for_muscle_in_normal_dir = defaultdict(list)
+        self.torque_profile_list_for_muscle_in_normal_dir = ea.defaultdict(list)
         self.spline_points_func_array_normal_dir = []
         # Apply torques
         self.simulator.add_forcing_to(self.shearable_rod).using(
@@ -500,7 +516,7 @@ class Environment(gym.Env):
             torque_profile_recorder=self.torque_profile_list_for_muscle_in_normal_dir,
         )
 
-        self.torque_profile_list_for_muscle_in_binormal_dir = defaultdict(list)
+        self.torque_profile_list_for_muscle_in_binormal_dir = ea.defaultdict(list)
         self.spline_points_func_array_binormal_dir = []
         # Apply torques
         self.simulator.add_forcing_to(self.shearable_rod).using(
@@ -515,7 +531,7 @@ class Environment(gym.Env):
             torque_profile_recorder=self.torque_profile_list_for_muscle_in_binormal_dir,
         )
 
-        self.torque_profile_list_for_muscle_in_twist_dir = defaultdict(list)
+        self.torque_profile_list_for_muscle_in_twist_dir = ea.defaultdict(list)
         self.spline_points_func_array_twist_dir = []
         # Apply torques
         self.simulator.add_forcing_to(self.shearable_rod).using(
@@ -531,7 +547,7 @@ class Environment(gym.Env):
         )
 
         # Call back function to collect arm data from simulation
-        class ArmMuscleBasisCallBack(CallBackBaseClass):
+        class ArmMuscleBasisCallBack(ea.CallBackBaseClass):
             """
             Call back function for Elastica rod
             """
@@ -539,7 +555,7 @@ class Environment(gym.Env):
             def __init__(
                 self, step_skip: int, callback_params: dict,
             ):
-                CallBackBaseClass.__init__(self)
+                ea.CallBackBaseClass.__init__(self)
                 self.every = step_skip
                 self.callback_params = callback_params
 
@@ -558,13 +574,13 @@ class Environment(gym.Env):
                     return
 
         # Call back function to collect target sphere data from simulation
-        class RigidSphereCallBack(CallBackBaseClass):
+        class RigidSphereCallBack(ea.CallBackBaseClass):
             """
             Call back function for target sphere
             """
 
             def __init__(self, step_skip: int, callback_params: dict):
-                CallBackBaseClass.__init__(self)
+                ea.CallBackBaseClass.__init__(self)
                 self.every = step_skip
                 self.callback_params = callback_params
 
@@ -584,8 +600,8 @@ class Environment(gym.Env):
 
         if self.COLLECT_DATA_FOR_POSTPROCESSING:
             # Collect data using callback function for postprocessing
-            self.post_processing_dict_rod = defaultdict(list)
-            # list which collected data will be append
+            self.post_processing_dict_rod = ea.defaultdict(list)
+            # list which collected data will be appended
             # set the diagnostics for rod and collect data
             self.simulator.collect_diagnostics(self.shearable_rod).using(
                 ArmMuscleBasisCallBack,
@@ -593,8 +609,8 @@ class Environment(gym.Env):
                 callback_params=self.post_processing_dict_rod,
             )
 
-            self.post_processing_dict_sphere = defaultdict(list)
-            # list which collected data will be append
+            self.post_processing_dict_sphere = ea.defaultdict(list)
+            # list which collected data will be appended
             # set the diagnostics for cyclinder and collect data
             self.simulator.collect_diagnostics(self.sphere).using(
                 RigidSphereCallBack,
@@ -666,11 +682,16 @@ class Environment(gym.Env):
 
         rod_compact_velocity = self.shearable_rod.velocity_collection[..., -1]
         rod_compact_velocity_norm = np.array([np.linalg.norm(rod_compact_velocity)])
-        rod_compact_velocity_dir = np.where(
-            rod_compact_velocity_norm != 0,
-            rod_compact_velocity / rod_compact_velocity_norm,
-            0.0,
-        )
+        # rod_compact_velocity_dir = np.where(
+        #     rod_compact_velocity_norm != 0,
+        #     rod_compact_velocity / rod_compact_velocity_norm,
+        #     0.0,
+        # )
+
+        if rod_compact_velocity_norm[0] != 0:
+            rod_compact_velocity_dir = rod_compact_velocity / rod_compact_velocity_norm
+        else:
+            rod_compact_velocity_dir = np.zeros_like(rod_compact_velocity)
 
         sphere_compact_state = self.sphere.position_collection.flatten()  # 2
         sphere_compact_velocity = self.sphere.velocity_collection.flatten()
@@ -695,7 +716,9 @@ class Environment(gym.Env):
                 sphere_compact_velocity_dir,
             )
         )
-
+        # if np.isnan(state).any() or np.isinf(state).any():
+        #     print("NaNs or Infs detected in get_state()")
+        #     state = np.nan_to_num(state, nan=0.0, posinf=1e6, neginf=-1e6)
         return state
 
     def step(self, action):
@@ -862,7 +885,7 @@ class Environment(gym.Env):
         reward = 1.0 * reward_dist
         """ Done is a boolean to reset the environment before episode is completed """
         done = False
-
+        truncated = False
         # Position of the rod cannot be NaN, it is not valid, stop the simulation
         invalid_values_condition = _isnan_check(self.shearable_rod.position_collection)
 
@@ -887,7 +910,8 @@ class Environment(gym.Env):
             self.on_goal = 0
 
         if self.current_step >= self.total_learning_steps:
-            done = True
+            # done = True
+            truncated = True
             if reward > 0:
                 print(
                     " Reward greater than 0! Reward: %0.3f, Distance: %0.3f "
@@ -902,7 +926,8 @@ class Environment(gym.Env):
 
         self.previous_action = action
 
-        return state, reward, done, {"ctime": self.time_tracker}, {}
+        # return state, reward, done, {"ctime": self.time_tracker}, {}
+        return state, reward, done, truncated, {"ctime": self.time_tracker}
 
     def render(self, mode="human"):
         """
